@@ -1,0 +1,7 @@
+*.bak
+*.zip
+.DS_Store
+Thumbs.db
+CLAUDE.md
+.claude/
+AW_Rescue.lua

@@ -1,0 +1,23 @@
+# CurseForge / BigWigs packager metadata for Arc Weave.
+# Everything under `ignore` is left OUT of the packaged addon zip.
+package-as: ArcWeave
+
+# Use the formatted changelog for the CurseForge/Wago file notes instead of
+# the packager's auto-generated commit list.
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+ignore:
+  - .git
+  - .github
+  - .gitignore
+  - .gitattributes
+  - .claude
+  - .pkgmeta
+  - CHANGELOG.md
+  - README.md
+  - CLAUDE.md
+  - Media/Store
+  - "*.bak"
+  - AW_Rescue.lua
