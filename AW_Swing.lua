@@ -171,6 +171,63 @@ local function IsQueued(sid)
     return q == true
 end
 
+-- ── queued bar colour (opt-in, DB.queueBarTint) ─────────────────────────────
+-- While a next-melee ability is queued, the main-hand bar's FILL takes the
+-- chosen colour. Blizzard sets that fill's atlas once (InitializeBarPresentation)
+-- and never re-tints it, so ours holds; it is desaturated first so the colour
+-- lands clean instead of mixing with the gold art. Only widget methods on the
+-- texture, no field writes on Blizzard's frame. Undone only if WE tinted it,
+-- so an option left off never touches the bar. Event-driven: queue changes
+-- (CURRENT_SPELL_CAST_CHANGED), main-hand swings and spell changes.
+local barTinted = false
+
+local function IsColor(c) return type(c) == "table" and type(c[1]) == "number" end
+
+-- the DEFAULT colour, for abilities without their own (nil = cyan)
+local function QueueBarColor()
+    local c = DB and DB.queueBarColor
+    if IsColor(c) then return c end
+    return COL.arc
+end
+
+-- per tracked ability, keyed by the entry exactly as the Tracked list stores
+-- it (a name or an ID), so it survives the list being reordered
+local function AbilityQueueColor(entry)
+    local map = DB and DB.queueBarColors
+    local c = map and map[tostring(entry)]
+    if IsColor(c) then return c end
+    return QueueBarColor()
+end
+
+-- the colour of whatever is queued right now, nil when nothing is
+local function QueuedColor()
+    for _, rec in ipairs(tracked) do
+        if IsQueued(rec.sid) then return AbilityQueueColor(rec.entry) end
+    end
+    -- the Pet Weave queue ability counts even when it is not a tracked tick
+    local pet = AW.Pet and AW.Pet.GetQueueSpell and AW.Pet.GetQueueSpell()
+    local sid = pet and ResolveEntry(pet)
+    if sid and IsQueued(sid) then return QueueBarColor() end
+    return nil
+end
+
+local function PaintQueueBar()
+    local f = _G[MH.frame]
+    local bar = f and f.StatusBar
+    local tex = bar and bar:GetStatusBarTexture()
+    if not tex then return end
+    local c = DB and DB.queueBarTint == true and QueuedColor()
+    if c then
+        tex:SetDesaturated(true)
+        tex:SetVertexColor(c[1], c[2], c[3])
+        barTinted = true
+    elseif barTinted then
+        tex:SetDesaturated(false)
+        tex:SetVertexColor(1, 1, 1)
+        barTinted = false
+    end
+end
+
 -- BLIZZARD'S FRAME IS THE AUTHORITY for a lane's swing clock; our
 -- PLAYER_SWING stamps win when they are newer (both frames get the event and
 -- their order is undefined, so Blizzard's fields can lag one swing inside our
@@ -292,7 +349,11 @@ end
 -- in the chain is ever read back - a secret-driven edge makes its geometry
 -- secret, and drawing that is fine while measuring it is not. `lane` is the
 -- bar the marker belongs to (a preview marker's too): it picks the icon side.
-local function NewMark(i, isRuler, parent, lane)
+-- `rideOn` (optional): a texture whose RIGHT edge the tick is pinned to
+-- instead - Blizzard's own swing fill, so a queued tick rides the moving edge
+-- to where the swing lands with nothing read back (the Arc Auras "Queued
+-- rides the swing" mode).
+local function NewMark(i, isRuler, parent, lane, rideOn)
     local m = CreateFrame("Frame", nil, parent)
     m:SetAllPoints(parent)
     m:Hide()
@@ -300,7 +361,9 @@ local function NewMark(i, isRuler, parent, lane)
     m.hostFrame = parent
     m.lane = lane
     m.tick = m:CreateTexture(nil, "OVERLAY", nil, 3)
-    if isRuler then
+    if rideOn then
+        m.anchor = rideOn
+    elseif isRuler then
         m.bar = CreateFrame("StatusBar", nil, m)
         m.bar:SetAllPoints(m)
         m.bar:SetStatusBarTexture(WHITE)
@@ -515,6 +578,9 @@ local function EnsureSlot(L, i)
     S.endGo = NewMark(i, false, host, L)    -- ready/queued at the right end (jumpToEnd)
     S.endFar = NewMark(i, false, host, L)   -- red (too far out)
     S.spot = NewMark(i, true, host, L)      -- ready/queued IN PLACE (plain 0..1 ruler)
+    -- queued, riding Blizzard's fill edge (DB.queueFollow). host's parent IS
+    -- that StatusBar (EnsureHost), so its fill texture always exists here.
+    S.ride = NewMark(i, false, host, L, host:GetParent():GetStatusBarTexture())
     S.farCurve = NewCurve()
     S.shadow = MakeShadow()
     -- the exact ready moment: stamp WHERE it came back (plain GetTime) and
@@ -536,6 +602,7 @@ local function HideSlot(S)
     S.endGo:Hide()
     S.endFar:Hide()
     S.spot:Hide()
+    S.ride:Hide()
 end
 
 local function HideLane(L)
@@ -584,6 +651,13 @@ local function RefreshSpell(L, i, rec, sStart, sDur, now)
         HideSlot(S)
         local color = queued and COL.arc or COL.green
         local label = queued and "QUEUED" or "READY"
+        -- riding: queued only; a ready one keeps its place
+        if queued and DB.queueFollow then
+            Paint(S.ride, rec, color, nil)
+            S.ride:SetAlpha(1)
+            S.ride:Show()
+            return label .. " - riding the swing's fill edge"
+        end
         if DB.jumpToEnd then
             Paint(S.endGo, rec, color, nil)
             S.endGo:SetAlpha(1)
@@ -629,6 +703,8 @@ local function RefreshSpell(L, i, rec, sStart, sDur, now)
     end
     S.endGo:Hide()
     S.spot:Hide()
+    -- a queued one that just fired: its rider would keep following the fill
+    S.ride:Hide()
 
     Paint(S.endFar, rec, COL.red, nil)
     SetWindow(S.farCurve, (MAX_AHEAD + 1) * sDur - e, BIG)
@@ -678,6 +754,8 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
     if event == "PLAYER_SWING" then
         local L = (a2 == MAINHAND and MH) or (a2 == OFFHAND and OH) or nil
         -- a switched-off off hand costs nothing: no stamp, no overlay
+        -- a landed swing spends the queued ability: the bar colour follows
+        if a2 == MAINHAND then PaintQueueBar() end
         if not L or (L.opt and not (DB and DB[L.opt])) then return end
         if type(a1) ~= "number" or IsSecret(a1) or a1 <= 0 then return end
         local sw = L.swing
@@ -692,9 +770,11 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
             if L.gen == myGen and not LiveSwing(L) then HideLane(L) UpdatePreview() end
         end)
     elseif event == "SPELL_UPDATE_COOLDOWN" or event == "CURRENT_SPELL_CAST_CHANGED" then
+        if event == "CURRENT_SPELL_CAST_CHANGED" then PaintQueueBar() end
         if AnyLive() then QueueRefresh() end
     elseif event == "SPELLS_CHANGED" then
         RebuildTracked()
+        PaintQueueBar()
         if AnyLive() then QueueRefresh() end
     elseif event == "PLAYER_LOGIN" then
         -- MIGRATION: adopt an Arc Next Swing profile wholesale the first time,
@@ -763,7 +843,8 @@ end
 
 local function RemoveAt(i)
     if not DB or not DB.spells or not DB.spells[i] then return false end
-    table.remove(DB.spells, i)
+    local entry = table.remove(DB.spells, i)
+    if DB.queueBarColors then DB.queueBarColors[tostring(entry)] = nil end
     RebuildTracked()
     HideMarks()
     return true
@@ -774,6 +855,24 @@ end
 local function SetJumpToEnd(v)
     if not DB then return end
     DB.jumpToEnd = v and true or nil
+    if AnyLive() then QueueRefresh() end
+end
+
+-- the one "Ready or queued marker" choice (same three as Arc Auras), over the
+-- two saved switches so every older profile reads back unchanged:
+--   stay   - the tick stays where it came back (both nil, the default)
+--   jump   - it jumps to the end of the bar (jumpToEnd)
+--   follow - a QUEUED tick rides the swing's fill edge; a ready one stays
+local function GetTickPlace()
+    if DB and DB.queueFollow then return "follow" end
+    if DB and DB.jumpToEnd then return "jump" end
+    return "stay"
+end
+
+local function SetTickPlace(mode)
+    if not DB then return end
+    DB.jumpToEnd = (mode == "jump") or nil
+    DB.queueFollow = (mode == "follow") or nil
     if AnyLive() then QueueRefresh() end
 end
 
@@ -816,6 +915,26 @@ local function SetMarkerSize(key, v)
     if AnyLive() then QueueRefresh() end
 end
 
+-- queued bar colour: the switch (default off) and its colour (nil = cyan)
+local function SetQueueBarTint(v)
+    if not DB then return end
+    DB.queueBarTint = v and true or nil
+    PaintQueueBar()
+end
+
+local function SetQueueBarColor(c)
+    if not DB or type(c) ~= "table" then return end
+    DB.queueBarColor = { c[1], c[2], c[3] }
+    PaintQueueBar()
+end
+
+local function SetAbilityQueueColor(entry, c)
+    if not DB or entry == nil or type(c) ~= "table" then return end
+    DB.queueBarColors = DB.queueBarColors or {}
+    DB.queueBarColors[tostring(entry)] = { c[1], c[2], c[3] }
+    PaintQueueBar()
+end
+
 local function SetShowIcon(v)
     if not DB then return end
     DB.hideIcon = (not v) or nil
@@ -843,8 +962,9 @@ function NS.Snapshot()
     add(("time %s | build %s"):format(Show(GetTime()), tostring((select(2, GetBuildInfo())))))
     add(("enabled: %s | tracked entries: %d | resolved: %d"):format(
         tostring(DB and DB.enabled), DB and DB.spells and #DB.spells or -1, #tracked))
-    add(("ready/queued tick: %s"):format((DB and DB.jumpToEnd)
-        and "jumps to the end of the bar" or "stays in place (default)"))
+    local place = GetTickPlace()
+    add(("ready/queued tick: %s"):format((place == "follow" and "queued rides the swing's fill")
+        or (place == "jump" and "jumps to the end of the bar") or "stays in place (default)"))
     add(("off-hand ticks: %s"):format((DB and DB.offHand)
         and (DB.ohIconsAbove and "on, icons above the bar" or "on, icons below the bar")
         or "off (default)"))
@@ -1021,6 +1141,8 @@ NS.SetEnabled = SetEnabled
 NS.AddSpell = AddSpell
 NS.RemoveAt = RemoveAt
 NS.SetJumpToEnd = SetJumpToEnd
+NS.SetTickPlace = SetTickPlace
+function NS.GetTickPlace() return GetTickPlace() end
 NS.SetOffHand = SetOffHand
 NS.SetOffHandIconsAbove = SetOffHandIconsAbove
 NS.SizeRange = SIZE          -- the panel reads min/max/step from here
@@ -1028,6 +1150,12 @@ NS.SetMarkerSize = SetMarkerSize
 NS.SetShowIcon = SetShowIcon
 function NS.GetMarkerSize(key) return Opt(key) end
 function NS.GetShowIcon() return ShowIcon() end
+NS.SetQueueBarTint = SetQueueBarTint
+NS.SetQueueBarColor = SetQueueBarColor
+function NS.GetQueueBarTint() return DB ~= nil and DB.queueBarTint == true end
+function NS.GetQueueBarColor() return QueueBarColor() end
+NS.SetAbilityQueueColor = SetAbilityQueueColor
+function NS.GetAbilityQueueColor(entry) return AbilityQueueColor(entry) end
 
 SLASH_ARCWEAVESWING1 = "/ans"
 SLASH_ARCWEAVESWING2 = "/arcnextswing"

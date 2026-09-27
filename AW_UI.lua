@@ -331,10 +331,35 @@ local function SpellRow(pg, i)
         if Spells()[i] then SW.RemoveAt(i) end
         AT.LayoutPage(pg)
     end)
+    -- this ability's queued bar colour, only while that option is on
+    local sw = AT.MakeSwatch(row)
+    sw:SetPoint("LEFT", rm, "RIGHT", 10, 0)
+    AT.Tooltip(sw, "Queued bar color",
+        "The main-hand swing bar fills in this color while this ability is queued.")
+    sw:SetScript("OnClick", function()
+        AT.CloseDropdown()
+        local entry = Spells()[i]
+        if not entry or not ColorPickerFrame.SetupColorPickerAndShow then return end
+        local c = SW.GetAbilityQueueColor(entry)
+        ColorPickerFrame:SetupColorPickerAndShow({
+            r = c[1], g = c[2], b = c[3], hasOpacity = false,
+            swatchFunc = function()
+                local r, g, b = ColorPickerFrame:GetColorRGB()
+                SW.SetAbilityQueueColor(entry, { r, g, b })
+                sw:SetColor({ r, g, b })
+            end,
+            cancelFunc = function()
+                SW.SetAbilityQueueColor(entry, c)
+                sw:SetColor(c)
+            end,
+        })
+    end)
     row._colLabel, row._colCtrl = lbl, rm
     row._sync = function()
         local entry = Spells()[i]
         if not entry then return end
+        sw:SetShown(SW.GetQueueBarTint())
+        sw:SetColor(SW.GetAbilityQueueColor(entry))
         local sid = SW.Resolve(entry)
         local tex = sid and C_Spell and C_Spell.GetSpellTexture
             and C_Spell.GetSpellTexture(sid) or nil
@@ -391,10 +416,20 @@ local function BuildSwing(pg)
         function() local d = SDB() return d ~= nil and d.enabled == true end,
         function(v) SW.SetEnabled(v) end, nil,
         "Draw the cooldown ticks for your tracked abilities on Blizzard's mainhand swing bar.")
-    AT.RowToggle(pg, "Keep the tick in place",
-        function() local d = SDB() return not (d and d.jumpToEnd) end,
-        function(v) SW.SetJumpToEnd(not v) end, nil,
-        "When an ability comes off cooldown or you queue it, the tick stays where it came back and only changes color. Off: it jumps to the end of the bar, where the attack lands.")
+    -- the same three choices, in the same words, as Arc Auras' swing bars
+    local place = AT.RowDropdown(pg, panel, "Ready or queued marker",
+        function() return SW.GetTickPlace() end,
+        function(v) SW.SetTickPlace(v) end,
+        function()
+            return {
+                { text = "Stays where it came back", value = "stay" },
+                { text = "Jumps to where the swing lands", value = "jump" },
+                { text = "Queued rides the swing", value = "follow" },
+            }
+        end)
+    place:EnableMouse(true)
+    AT.Tooltip(place, "Ready or queued marker",
+        "Stays: the tick stays where the ability came back and only changes color. Jumps: it moves to the end of the bar, where the attack lands. Queued rides: once you queue it, the tick and icon ride the swing bar's moving fill to where the attack lands; a ready one stays where it came back.")
     local function offHandOn() local d = SDB() return d ~= nil and d.offHand == true end
     AT.RowToggle(pg, "Show ticks on the off-hand swing timer", offHandOn,
         function(v) SW.SetOffHand(v) end, nil,
@@ -404,6 +439,14 @@ local function BuildSwing(pg)
         function(v) SW.SetOffHandIconsAbove(v) end,
         function() return offHandOn() and SW.GetShowIcon() end,
         "Off: the off-hand icons hang below that bar, because Blizzard stacks it right under the main-hand bar and icons above it would cover that bar. On: they sit above it, for when you have moved the bars apart in Edit Mode.")
+    AT.RowToggle(pg, "Color the swing bar while an ability is queued",
+        function() return SW.GetQueueBarTint() end,
+        function(v) SW.SetQueueBarTint(v) end, nil,
+        "While a next-melee ability such as Raptor Strike is queued, the main-hand swing bar fills in that ability's color. Set a color per ability on the Tracked tab; the default below covers the rest. It goes back to normal as soon as the queued attack lands or you cancel it.")
+    AT.RowColor(pg, "Default queued color",
+        function() return SW.GetQueueBarColor() end,
+        function(c) SW.SetQueueBarColor(c) end,
+        function() return SW.GetQueueBarTint() end)
     AT.RowDesc(pg, "Needs Blizzard's swing timer turned on. Everything here is drawn on that bar.")
 end
 

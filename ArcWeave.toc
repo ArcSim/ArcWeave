@@ -2,7 +2,7 @@
 ## Title: |cff3fc9f2Arc|r Weave
 ## Notes: Weave abilities and pet commands into your swing rhythm - next-melee markers on the swing timer, queued next-attack abilities, and pet attack on your own buttons. /arcweave
 ## Author: Arc
-## Version: 1.0.0
+## Version: 1.0.1
 ## AllowLoadGameType: camelot
 ## OptionalDeps: Blizzard_SwingTimer
 ## AllowAddOnTableAccess: 1
@@ -15,4 +15,7 @@ AW_Init.lua
 AW_Theme.lua
 AW_Swing.lua
 AW_Pet.lua
+#@do-not-package@
+AW_Rescue.lua
+#@end-do-not-package@
 AW_UI.lua

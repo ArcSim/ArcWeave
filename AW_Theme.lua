@@ -1,182 +1,52 @@
---[[===========================================================================
-  ARC UI THEME -- canonical primitives for a hand-built (no-Ace) options panel.
-
-  THIS FILE IS THE SOURCE OF TRUTH. Copy it into a new Arc addon, rename AT if
-  you like, and build the panel from it. Do NOT re-derive the look from an
-  existing addon's file: those drift. Fix bugs and add features HERE first, then
-  carry them into the addons.
-
-  Everything hangs off ONE table (AT). That is deliberate: a big single-file
-  addon sits at Lua's 200-file-level-local ceiling, and thirty loose locals for
-  the theme is enough to tip it into a hard load failure that luac -p reports as
-  "too many local variables".
-
-  A MENU, NOT A FRAMEWORK. Take only what the addon needs; nothing here is a stub.
-  Minimum viable panel: CreateWindow -> NewPage -> Section -> Row* -> LayoutPage.
-
-  FOUNDATION (always)
-    AT.COL                     the palette. Never hardcode a hex.
-    AT.Skin(f, bg, border)     flat fill + 1px edge, every surface
-    AT.CloseDropdown()         wire to the window OnMouseDown/OnHide
-
-  CHROME (as the addon's shape needs)
-    AT.CreateWindow(name,opts) solid navy window, title bar, close, drag, resize grip
-    AT.AddTabs(p,names,pages)  chip tabs on a cyan line. Skip for a single-page addon.
-    AT.AddDiscordFooter(p,nm)  Discord button + copy popup. Reserve 34px at the bottom.
-
-  CONTROLS (raw widgets, when a row builder does not fit)
-    AT.MakeCheckbox(parent)    THE toggle. :SetOn(bool) :SetHover(bool)
-    AT.MakeSmallButton(p,l,w)  raised navy/steel button, cyan border on hover only
-    AT.MakeSwatch(p,w,h)       colour swatch, :SetColor{r,g,b}
-    AT.MakeDropdown(...)       windowed-scroll select; itemsFn re-read on every open
-    AT.MakeChevron(parent)     THE drawn arrow (dropdowns, tree carets). :SetDown(bool)
-    AT.MakeSplitter(p, axis, cb) the drag handle between two panes: hairline + 3-dot grip,
-                               cb.onStart / onDrag(delta) / onStop (v15)
-
-  ROW ENGINE (this is what makes it look Arc)
-    AT.NewPage(parent)         a page with its own rows and sections
-    AT.Section(pg,text,opts)   titled bordered box. opts: visibleFn, side "L"/"R",
-                               ctrlX, collapsible=true (header bar), store (remembers)
-    AT.LayoutPage(pg)          flow, size boxes to VISIBLE rows, measure the control
-                               column. Call after anything that shows/hides a row.
-    AT.AddRow / AT.RowLabel    bare row + standard label, for custom controls
-    AT.Tooltip(region,t,body)  hover tooltip. Descriptions NEVER get their own row.
-
-  ROW BUILDERS (one line each, fully wired)
-    AT.RowToggle   label + checkbox, whole row clickable, flip sound
-    AT.RowInput    sunken field; `hint` shows what is in effect WITHOUT pre-filling
-    AT.RowDropdown label + select
-    AT.RowSlider   fill slider + [-] typed box [+]; grows with the box
-    AT.RowColor    label + swatch + ColorPickerFrame
-    AT.RowButton   left-aligned action button (an action, not a setting)
-    AT.RowDesc     dim paragraph. Prefer a `desc` tooltip; use this only when the
-                   text must always be visible.
-
-  TWO MECHANISMS TO UNDERSTAND FIRST
-    visibleFn   on any row/section: return false and it hides AND its box shrinks on
-                the next LayoutPage. This is how dependent options collapse away.
-    row._sync   set by the builders, called by LayoutPage every pass to re-read the DB
-                into the widget. Set it on custom rows too or they go stale.
-
-  House rules baked in: solid background, one cyan accent, boxed sections,
-  raised buttons vs sunken fields, square checkbox toggles, descriptions as
-  hover tooltips, no em-dashes or emoji in user-facing strings.
-=============================================================================]]
+-- Arc UI theme: window chrome, controls and a row layout engine for hand-built
+-- options panels. A panel is CreateWindow -> NewPage -> Section -> rows ->
+-- LayoutPage. Everything hangs off one table (AT) because a big single-file
+-- addon can sit near Lua's 200-local limit.
 
 local AT = {}
 
--- THEME VERSION. Bump this on EVERY change to this file, and never edit a copy
--- of it in another addon - copies are pushed from here by
--- E:\WoWDev\tools\arc-theme-sync\sync.lua, which reads this number to report
--- who is behind. Before this existed there was no way to answer "who has the
--- latest theme" without auditing feature by feature, and four different
--- generations had accumulated across the addons (the skill's template being
--- the OLDEST, which is how new addons kept being born stale).
---   5  2026-09-23  auto-fit window scale: a panel lands on the same share of
---                  screen height at any resolution, with a HARD per-window
---                  clamp (MAX_W/MAX_H) that no slider value can defeat.
---                  Hairline now measures device-pixels-per-unit on the frame
---                  itself. LayoutPage syncs rows BEFORE measuring the control
---                  column (the ".." blank-label bug, which was live in 8 files).
---   6  2026-09-23  default uiScale 0.85 (Arc's preferred size on a fresh
---                  install, across every Arc addon)
---   7  2026-09-23  STRUCTURE PASS. Section header actions (opts.action),
---                  AT.RowActions (grouped, edge-aligned button rows),
---                  AT.MakeQuietButton (secondary/destructive weight) and
---                  AT.RowDivider. See the ANCHORED-ACTION and GROUPED-ACTION
---                  laws: a standalone RowButton floats on the left margin with
---                  nothing to align to, and a panel full of them reads as
---                  scattered controls.
---   8  2026-09-23  SECTION BLOCKS. A hairline rule under every plain section
---                  title (spanning the section), header height up to LAY.hdr,
---                  and LAY.gap 12 -> 18. Arc, comparing against Blizzard's own
---                  options: "more structure on the sections". A 10px title
---                  with 13px of header did not read as a boundary at all.
---   9  2026-09-23  REVERSES the v7 header action. Arc: "don't put buttons on
---                  the title of the section - they look like they are part of
---                  the title". A header sits right under the PREVIOUS
---                  section's content, so a button there has ambiguous
---                  ownership. opts.action is GONE. Instead AT.RowButton now
---                  puts its button ON THE CONTROL COLUMN (and takes an
---                  optional row label), so an action lines up with every other
---                  control and stays visibly inside its section.
---  10  2026-09-23  Control-column cap measures the WIDEST control in the
---                  section instead of assuming 34px. A wide action button on
---                  a column measured from long labels ran past the section
---                  edge and SetClipsChildren cut its right side off.
---  11  2026-09-23  FIRST-PASS SIZES. An anchored frame has no real width until
---                  the client lays it out, so the first LayoutPage after a
---                  panel is built measured 0 and every width-dependent
---                  decision was skipped - a wide button stayed clipped until
---                  the window was resized BY HAND, which is how Arc found it.
---                  Now the width is derived from the page (same insets span()
---                  uses), and anything still unresolved flags a single capped
---                  re-pass on the next frame. RowDesc flags it too.
--- v12 (2026-09-23): RowSlider LIVE BOUNDS - minV / maxV may be functions,
---                  re-read on every sync, so a slider's range can follow the
---                  record (Arc: a stack threshold slider ran 0..99 on a
---                  three-stack aura, "the sliders throw me off"; it now runs
---                  2..the bar's own maximum). Fixed numbers work as before.
--- v13 (2026-09-23): AT.Tooltip DYNAMIC BODY NIL. `f() or body` handed back the
---                  FUNCTION when a body function answered nil, so a title-only
---                  tooltip fired on every region whose body said "nothing now"
---                  (Arc UI v2's rail rows). Resolved in two steps; a title
---                  function is guarded the same way.
--- v14 (2026-09-23): DROPDOWN WIDTH FROM THE LIVE LIST. MakeDropdown sized its
---                  field once at build, when a record-dependent list held
---                  only its placeholder; the field stayed too narrow until
---                  the first open re-measured it. Refresh (run on every sync)
---                  now re-sizes to the current items, so the first paint is
---                  already right.
--- v15 (2026-09-23): AT.MakeSplitter - the drag handle between two panes (a
---                  strip filling the gap, a hairline down its middle, a
---                  three-dot grip at its centre, cyan on hover / drag), with
---                  onStart / onDrag(delta) / onStop callbacks. Arc UI v2's
---                  rail width and layout-list height ride on it.
-AT.VERSION = 15
+-- Other addons carry copies of this file, generated from it by the
+-- arc-theme-sync tool, which compares this number to find stale copies.
+-- Bump it on every change and never edit a copy.
+AT.VERSION = 16
 
 AT.WHITE = "Interface\\Buttons\\WHITE8X8"
 AT.DISCORD = "https://discord.gg/yMZmnFjUTd"
 
 AT.COL = {
-    bg       = { 0.043, 0.059, 0.102 },  -- window body (SOLID, never translucent)
-    panel    = { 0.063, 0.094, 0.153 },  -- title bar, dropdown pullout, header bars
-    well     = { 0.039, 0.067, 0.125 },  -- SUNKEN input fields and dropdowns
+    bg       = { 0.043, 0.059, 0.102 },  -- window body, always opaque
+    panel    = { 0.063, 0.094, 0.153 },  -- title bar, pullouts, header bars
+    well     = { 0.039, 0.067, 0.125 },  -- sunken input fields and dropdowns
     line     = { 0.114, 0.165, 0.247 },  -- 1px borders and hairlines
-    line2    = { 0.165, 0.231, 0.341 },  -- brighter outer window border, checkbox edge
-    box      = { 0.055, 0.078, 0.130 },  -- section container fill, a step above bg
+    line2    = { 0.165, 0.231, 0.341 },  -- brighter: window outline, checkbox
+    box      = { 0.055, 0.078, 0.130 },  -- section box fill, a step above bg
     ink      = { 0.950, 0.970, 1.000 },  -- near-white primary text
-    dim      = { 0.700, 0.780, 0.880 },  -- secondary text, hints, unselected tabs
+    dim      = { 0.700, 0.780, 0.880 },  -- secondary text, hints, idle tabs
     faint    = { 0.550, 0.650, 0.780 },  -- placeholder text, off-state knob
-    arc      = { 0.247, 0.788, 0.949 },  -- ARC CYAN, the one accent (#3FC9F2)
+    arc      = { 0.247, 0.788, 0.949 },  -- the accent (#3FC9F2)
     arcDeep  = { 0.078, 0.353, 0.451 },  -- deep teal, hover borders
     btn      = { 0.110, 0.161, 0.243 },  -- raised navy button fill
     btnHover = { 0.150, 0.205, 0.295 },  -- button fill on hover
-    steel    = { 0.298, 0.400, 0.549 },  -- steel button border (cyan only on hover)
+    steel    = { 0.298, 0.400, 0.549 },  -- button border, cyan on hover
     blurple  = { 0.345, 0.396, 0.949 },  -- Discord #5865F2
 }
 
--- Layout constants. Row heights are deliberately tight: the locked template lets
--- the row height do the breathing, not padding.
+-- Layout constants, in pixels. Spacing comes from the row height, not padding.
 AT.LAY = {
     rowH = 24, descH = 20, hdr = 22,
-    ctrl = 230,          -- fallback control column when a section does not measure
-    gap  = 18,           -- between section blocks. Blizzard's options give a
-                         -- heading real air above it and that is most of why
-                         -- theirs scans; 12 was too tight for a titled block
-                         -- to read as separate from the one before it.
+    ctrl = 230,          -- fallback when a section can't measure its column
+    gap  = 18,           -- between section blocks; any less and a titled
+                         -- block doesn't read as separate from the one above
     fieldW = 180,
-    sliderW = 110,       -- the locked template slider: whole cluster
-                         -- (slider + [-][value][+]) lands at ~190px, the
-                         -- same footprint as ArcSkin's range rows
+    sliderW = 110,       -- the slider; with the [-][value][+] stepper
+                         -- the cluster is ~190px, like ArcSkin's range rows
 }
 
 local COL, WHITE, LAY = AT.COL, AT.WHITE, AT.LAY
 
--- ONE physical pixel in a frame's effective UI units. A literal edgeSize=1
--- rounds to ZERO on one side at fractional effective scales - the "missing
--- border on the checkbox" class of bug - so every edge is sized in real
--- pixels instead.
+-- One physical pixel in a frame's effective UI units. A literal edgeSize = 1
+-- rounds to zero on one side at fractional effective scales, so edges are
+-- sized in real pixels.
 function AT.Px(f)
     local _, physH = GetPhysicalScreenSize()
     local scale = (f and f.GetEffectiveScale and f:GetEffectiveScale())
@@ -185,81 +55,50 @@ function AT.Px(f)
     return (768 / physH) / scale
 end
 
--- THE HAIRLINE LAW (2026-09-22, Panel scale 1.6 lost the left edge of every
--- checkbox on the Visibility tab): at a pixel-perfect scale (one unit = a
--- whole number of device pixels) a hairline is exactly ONE device pixel; at
--- a fractional Panel scale every control sits on fractional pixels, and a
--- one-pixel strip can fall between two pixel columns and vanish - so there a
--- hairline is TWO device pixels, which always owns one solid column whatever
--- the phase. Every Skin border reads this; SetUIScale re-applies it to every
--- skinned frame, so a live slider change can never strand a strip at the
--- old width either.
+-- Hairline width for a frame: one device pixel when a UI unit is a whole
+-- number of device pixels. At a fractional scale a one-pixel strip can fall
+-- between two pixel columns and vanish, so there it is two, which always
+-- covers one solid column. Skin borders use it; SetUIScale re-applies it.
 AT.skinned = AT.skinned or setmetatable({}, { __mode = "k" })
 function AT.Hairline(f)
     local px = AT.Px(f)
-    -- the TOTAL factor, not just the slider: auto-fit alone is fractional on
-    -- most screens, so reading AT.uiScale here would report "integer, 1px is
-    -- safe" at 1440p with the slider untouched and strand the edges again.
-    -- Measured on the frame's OWN window, since each one now fits separately.
+    -- The frame's own total factor, not AT.uiScale: auto-fit alone is
+    -- fractional on most screens.
     local v = (AT.ScaleFactor and AT.ScaleFactor(f)) or (AT.uiScale or 1)
     if math.abs(v - math.floor(v + 0.5)) < 0.01 then return px end
     return px * 2
 end
 
--- PANEL SCALE (Arc's ask: "a bigger scale might be needed on some screens").
--- The pixel-perfect law fixes a window at one-unit-equals-one-physical-pixel,
--- which on a dense display makes every panel small. This multiplies that base
--- so text AND controls grow together - the whole window, not a font size -
--- which is the only way to enlarge a pixel-scaled panel without the layout
--- coming apart. Above 1.0 a hairline is no longer exactly one device pixel:
--- AT.Hairline widens it to two, so it can never fall between pixel columns.
--- 0.85, not 1: Arc's own default across every Arc addon (2026-09-23). A fresh
--- install with nothing saved lands here, so the panels are a touch smaller than
--- the raw auto-fit target and match what he actually runs at.
+-- Panel scale: a personal multiplier on top of auto-fit. It scales the whole
+-- window, so text and controls grow together and the layout holds. The 0.85
+-- default sits a touch below the auto-fit target.
 AT.uiScale = 0.85
 AT.windows = AT.windows or {}
 
--- AUTO-FIT (2026-09-23, Arc: "a bigger ratio of the screen, but the same
--- ratio on any screen people play"). The pixel-perfect law alone makes a
--- window cover designH/physH of the screen - 37% at 1440p, 25% at 4K - so
--- the better the monitor the smaller the panel, and uiScale defaulting to 1
--- meant everyone had to find the slider on every machine. This bakes the
--- screen fraction into the DEFAULT: a panel designed at REF_H units lands on
--- TARGET_H of screen height at any resolution or UI scale, and uiScale stays
--- a personal multiplier ON TOP of that.
+-- Auto-fit. At one unit per physical pixel a window covers designH / physH of
+-- the screen (37% at 1440p, 25% at 4K). Instead, a panel built REF_H units
+-- tall fills TARGET_H of the screen height at any resolution or UI scale.
 AT.TARGET_H = 0.60        -- share of screen height a reference panel fills
-AT.REF_H = 540            -- the height a "normal" Arc options panel is built at
-AT.MAX_W, AT.MAX_H = 0.94, 0.92   -- it may NEVER exceed these, whatever the slider says
+AT.REF_H = 540            -- design height of a typical options panel
+AT.MAX_W, AT.MAX_H = 0.94, 0.92   -- hard caps as a share of the screen
 
--- A window's height on screen is (its design height * its scale) measured in
--- UIParent units, so the scale that lands it on TARGET_H of the screen is just
--- TARGET_H * UIParent height / design height. It MUST use the window's own
--- design size: a fixed reference height (the 2026-09-23 first cut used 540)
--- scales a tall panel as though it were short, and ArcDisplay's options window
--- ran off the top and bottom of the screen.
---
--- THE CLAMP IS THE POINT. Auto-fit, a saved uiScale and a big design size all
--- multiply, so the result is capped against BOTH screen axes at the end. This
--- is a hard ceiling, applied after the slider, and it is what guarantees a
--- panel can never grow past the screen no matter what is stored.
+-- On-screen height is design height * scale (in UIParent units), so the scale
+-- for TARGET_H is TARGET_H * UIParent height / design height. Auto-fit, the
+-- saved uiScale and a large design size multiply, so the result is capped
+-- against both screen axes last: a panel can't grow past the screen.
 function AT.FitScale(designW, designH)
     local uw, uh = UIParent:GetWidth(), UIParent:GetHeight()
     if not (uw and uh and uh > 0) then return AT.Px(UIParent) * (AT.uiScale or 1) end
     if not designH or designH <= 0 then return AT.Px(UIParent) * (AT.uiScale or 1) end
-    -- Measured against max(this window, the reference panel). A window BIGGER
-    -- than the reference shrinks to hit the target instead of overflowing
-    -- (Arc's options panel is ~900 units tall and a shared factor ran it off
-    -- the screen); a window SMALLER than it - a picker popup, a confirm box -
-    -- rides the reference scale so it stays in proportion to the main panel
-    -- rather than blowing a 150-unit popup up to 60% of the screen.
+    -- Against max(this window, REF_H): a taller window shrinks to the target
+    -- instead of overflowing, and a small popup keeps the reference scale so
+    -- it stays in proportion to the main panel.
     local ref = designH > AT.REF_H and designH or AT.REF_H
     local s = (AT.TARGET_H * uh / ref) * (AT.uiScale or 1)
-    -- floor FIRST (the old pixel-perfect size is the smallest we ever go)...
+    -- Floor at the pixel-perfect scale first, then cap: flooring after the
+    -- caps could push an oversized window back past the screen.
     local floor = AT.Px(UIParent)
     if s < floor then s = floor end
-    -- ...then the caps, so the ceiling is always the LAST word. Applying the
-    -- floor afterwards could shove an oversized window back past the screen,
-    -- which would defeat the whole point of the clamp.
     local capH = AT.MAX_H * uh / designH
     if s > capH then s = capH end
     if designW and designW > 0 then
@@ -269,21 +108,15 @@ function AT.FitScale(designW, designH)
     return s
 end
 
--- the scale a window is CURRENTLY entitled to, from the size it was built at
+-- The scale a window gets from the size it was designed at.
 function AT.ScaleFor(w)
     if not w then return AT.Px(UIParent) * (AT.uiScale or 1) end
     return AT.FitScale(w._designW, w._designH)
 end
 
--- the TOTAL multiplier on the pixel-perfect base. Everything that cares about
--- whether units land on whole pixels must read THIS, not AT.uiScale: auto-fit
--- is fractional on most screens (1.6 at 1440p) even with the slider at 1.
--- DEVICE PIXELS PER UNIT of a frame. Whole number = that frame's units land on
--- pixel boundaries and a one-pixel hairline is safe; fractional = it can fall
--- between columns and needs two. Works for a window OR any skinned child,
--- which the old "is AT.uiScale an integer?" test could not do - and that test
--- also went blind the moment auto-fit made the real factor fractional with the
--- slider still sitting at 1.
+-- Device pixels per UI unit of a frame, a window or any child. Read this, not
+-- AT.uiScale, to know whether units land on whole pixels: auto-fit is
+-- fractional on most screens (1.6 at 1440p) with the slider at 1.
 function AT.ScaleFactor(f)
     local _, physH = GetPhysicalScreenSize()
     if not physH or physH <= 0 then return AT.uiScale or 1 end
@@ -292,7 +125,7 @@ function AT.ScaleFactor(f)
     return s * (physH / 768)
 end
 
--- kept for call sites that have no window in hand (a default-sized panel)
+-- Scale of a default-sized panel, for callers with no window in hand.
 function AT.WinScale()
     return AT.FitScale(460, 540)
 end
@@ -303,17 +136,11 @@ function AT.SetUIScale(v)
     AT.uiScale = v
     for _, w in ipairs(AT.windows) do
         if w and w.SetScale then
-            -- PER WINDOW: each one's scale comes from its OWN design size and
-            -- carries its own clamp, so a tall panel and a small popup can
-            -- never share one number (that is what overflowed the screen).
+            -- Each window's scale comes from its own design size and clamp.
             local target = AT.ScaleFor(w)
-            -- ANCHOR-DRIFT COMPENSATION. A SetPoint offset is expressed in the
-            -- frame's OWN scaled space, so screen position = offset * scale:
-            -- rescaling alone slides the window toward or away from its anchor
-            -- corner. ArcUI's bars hit this and sidestepped it by scaling SIZE
-            -- instead ("SetScale causes anchor-based drift"); ProcTracker fixes
-            -- it properly by re-offsetting through the scale ratio, which is
-            -- what this does, so the window stays exactly where it looks.
+            -- A SetPoint offset is in the frame's own scaled space (screen
+            -- position = offset * scale), so rescaling alone slides the window
+            -- toward its anchor; re-offsetting by the ratio keeps it put.
             local old = w:GetScale() or 1
             local ratio = (target > 0) and (old / target) or 1
             local pt, rel, relPt, x, y = w:GetPoint()
@@ -325,8 +152,7 @@ function AT.SetUIScale(v)
             if w:IsShown() then AT.SnapWindow(w) end
         end
     end
-    -- the hairline law: strips were sized in the OLD unit space - re-size
-    -- every skinned frame for the new scale (once per change, never per frame)
+    -- Edge strips were sized for the old scale; re-size them once per change.
     for f in pairs(AT.skinned) do
         local e = f._atEdges
         if e then
@@ -339,13 +165,10 @@ function AT.SetUIScale(v)
     end
 end
 
--- The single most reused primitive: flat fill + 1px edge. The edge is FOUR
--- pixel-snapped color-texture strips, NOT a backdrop edge: backdrop edges
--- drop a side whenever the frame rests at a fractional pixel position (the
--- trembling-borders / missing-pill-top report), while plain textures ride
--- the client's texel snapping and stay whole at any position. The frame's
--- SetBackdropBorderColor is rerouted to recolor the strips, so every
--- existing call site (hover states, focus rings) keeps working unchanged.
+-- Flat fill plus a one-pixel edge. The edge is four color-texture strips, not
+-- a backdrop edge: a backdrop edge drops a side when the frame rests at a
+-- fractional pixel position, while plain textures stay whole. The frame's
+-- SetBackdropBorderColor is replaced to recolor the strips.
 local EDGE_KEYS = { "top", "bottom", "left", "right" }
 function AT.Skin(f, bg, borderCol)
     if not f._atEdges then
@@ -354,12 +177,9 @@ function AT.Skin(f, bg, borderCol)
         for _, k in ipairs(EDGE_KEYS) do
             local t = f:CreateTexture(nil, "BORDER")
             t:SetColorTexture(1, 1, 1, 1)
-            -- DEFAULT texel sampling on purpose (the ArcUI-proven config):
-            -- grid-snapping a strip that is exactly one physical pixel tall
-            -- can COLLAPSE it to zero rows at certain fractional positions
-            -- (both edges round to the same pixel). With default sampling a
-            -- hairline at a fractional spot renders slightly soft instead -
-            -- dimmer at worst, never absent.
+            -- Default texel sampling on purpose: snapping a one-pixel strip
+            -- to the grid can collapse it to zero rows at some fractional
+            -- positions. Unsnapped, it only renders a little soft there.
             e[k] = t
         end
         e.top:SetPoint("TOPLEFT", 0, 0)
@@ -388,8 +208,8 @@ function AT.Skin(f, bg, borderCol)
     f:SetBackdropBorderColor(b[1], b[2], b[3], 1)
 end
 
--- pin a window's rect to the physical pixel grid: everything inside then
--- inherits an aligned origin, which is what keeps hairlines whole at rest
+-- Pins a window's rect to the physical pixel grid, so everything inside has
+-- an aligned origin and hairlines stay whole at rest.
 function AT.SnapWindow(p)
     local px = AT.Px(p)
     local l, t = p:GetLeft(), p:GetTop()
@@ -402,18 +222,18 @@ function AT.SnapWindow(p)
 end
 local Skin = AT.Skin
 
--- one dropdown pullout open at a time, panel-wide
+-- One dropdown pullout open at a time, panel-wide. Windows close it on
+-- mouse down and on hide.
 AT.openDropdown = nil
 function AT.CloseDropdown()
     if AT.openDropdown then AT.openDropdown:Hide(); AT.openDropdown = nil end
 end
 
---[[ CONTROLS ================================================================]]
+-- Controls
 
--- THE canonical toggle: a WoW-style square checkbox. The box is CONSTANT (it
--- never recolours); only the mark toggles. checkmark-minimal renders GREEN, so
--- desaturate BEFORE tinting or it stays green. The 20px mark in an 18px box
--- overhangs slightly, exactly like Blizzard's.
+-- Square checkbox. Only the mark toggles; the box never recolours. The
+-- checkmark-minimal atlas is green, so it is desaturated before tinting. The
+-- 20px mark overhangs the 18px box slightly, as Blizzard's does.
 function AT.MakeCheckbox(parent)
     local c = CreateFrame("Button", nil, parent, "BackdropTemplate")
     c:SetSize(18, 18); Skin(c, COL.well, COL.line2)
@@ -433,8 +253,7 @@ function AT.MakeCheckbox(parent)
     return c
 end
 
--- Raised action button: navy fill + STEEL border (never a cyan resting border),
--- cyan only on hover. Reads as raised against the sunken well fields.
+-- Raised button: navy fill and a steel border, cyan only on hover.
 function AT.MakeSmallButton(parent, label, w)
     local b = CreateFrame("Button", nil, parent, "BackdropTemplate")
     b:SetSize(w or 92, 22); Skin(b, COL.btn, COL.steel)
@@ -457,11 +276,9 @@ function AT.MakeSmallButton(parent, label, w)
     return b
 end
 
--- QUIET VARIANT. A destructive or secondary action ("Clear all", "Remove all")
--- rendered at full button weight competes with the primary action next to it
--- and the panel reads as a pile of equal buttons. This keeps the same
--- geometry - so a row of mixed buttons still lines up - and only drops the
--- fill and text down a step, lifting to the normal treatment on hover.
+-- Quiet button for secondary or destructive actions, so they don't compete
+-- with the primary one. Same geometry, so mixed rows line up; the fill and
+-- text drop a step and lift to the normal look on hover.
 function AT.MakeQuietButton(parent, label, w)
     local b = AT.MakeSmallButton(parent, label, w)
     b:SetBackdropColor(0, 0, 0, 0)
@@ -492,12 +309,9 @@ function AT.MakeSwatch(parent, w, h)
     return b
 end
 
--- THE Arc chevron: two rotated 1.5px bars (same as ArcSkin) - never a text
--- "v" / ">" glyph. One painter for the dropdown arrow AND every tree caret:
--- :SetDown(true) points down (dropdown, open branch), false points right
--- (shut branch). :SetDir("up"|"down"|"left"|"right") points any of the four
--- ways (the on-screen group grow arrows need up and left). :SetColor(c)
--- tints both bars. Mouse-transparent.
+-- Chevron drawn from two rotated 1.5px bars, for dropdowns and tree carets.
+-- :SetDown(true) points down, false points right; :SetDir("up" / "down" /
+-- "left" / "right") points any way; :SetColor(c) tints it. Mouse-transparent.
 function AT.MakeChevron(parent)
     local arrow = CreateFrame("Frame", nil, parent)
     arrow:SetSize(12, 12)
@@ -540,18 +354,10 @@ function AT.MakeChevron(parent)
     return arrow
 end
 
--- Windowed-scroll dropdown. itemsFn() -> { {value=,text=}, ... }, re-read on every
--- open so live lists stay current. Opens scrolled to the current value.
--- SPLITTER (v15, Arc UI v2, Arc: "the side one needs to be bigger and
--- needs a line so it reads as draggable"): the drag handle between two
--- panes, drawn the way every desktop app draws one - a strip filling the
--- gap, a hairline down its middle and a three-dot grip at its centre;
--- hairline + dots go cyan on hover and while dragging. axis = "x" (a
--- vertical bar dragged left / right, 12 wide) or "y" (a horizontal bar
--- dragged up / down, 12 tall). The caller anchors it and reacts through
--- cb.onStart() on press, cb.onDrag(delta) whenever the cursor moved (delta
--- in the strip's own units from the press point; right / up positive) and
--- cb.onStop() on release. The hairline follows AT.Hairline on every show.
+-- Drag handle between two panes. axis "x": a 12-wide vertical strip dragged
+-- sideways; "y": a 12-tall one dragged up and down. The caller anchors it and
+-- gets cb.onStart(), cb.onDrag(delta) and cb.onStop(); delta is in the strip's
+-- units from the press point, right and up positive.
 function AT.MakeSplitter(parent, axis, cb)
     cb = cb or {}
     local s = CreateFrame("Frame", nil, parent)
@@ -616,21 +422,18 @@ function AT.MakeDropdown(owner, parent, w, itemsFn, get, set, onSelect)
     local vf = b:CreateFontString(nil, "OVERLAY")
     vf:SetFont(STANDARD_TEXT_FONT, 11, "")
     vf:SetPoint("LEFT", 8, 0); vf:SetPoint("RIGHT", -18, 0); vf:SetJustifyH("LEFT")
-    -- a 20px-tall field is ONE line: bounded LEFT+RIGHT text WRAPS by
-    -- default, and a wrapped option name spills out over the box
+    -- itemsFn() -> { {value=,text=}, ... }, re-read on every open. The field
+    -- is one line: bounded text wraps by default and would spill over the box.
     vf:SetWordWrap(false)
     vf:SetTextColor(COL.ink[1], COL.ink[2], COL.ink[3])
-    -- drawn chevron (AT.MakeChevron) - never a text "v" glyph
     local arrow = AT.MakeChevron(b)
     arrow:SetPoint("RIGHT", -5, 0)
     b:SetScript("OnEnter", function() b:SetBackdropBorderColor(COL.arcDeep[1], COL.arcDeep[2], COL.arcDeep[3], 1) end)
     b:SetScript("OnLeave", function() b:SetBackdropBorderColor(COL.line[1], COL.line[2], COL.line[3], 1) end)
 
-    -- Auto width (w == nil): the field is exactly as long as the LONGEST
-    -- option name plus insets (8 text + 18 chevron), floored at 80 and
-    -- capped at 300 so a runaway name cannot eat the row. The pullout below
-    -- always copies the field width, so the two stay edge to edge. An
-    -- explicit w is honored untouched (hand-tuned call sites).
+    -- With no w, the field fits the longest option name plus insets, clamped
+    -- to 80-300 so a runaway name can't eat the row. The pullout copies the
+    -- field width.
     local function SizeToItems(items)
         if w then return end
         local fs = AT._measureFS
@@ -646,21 +449,17 @@ function AT.MakeDropdown(owner, parent, w, itemsFn, get, set, onSelect)
                 or fs:GetStringWidth() or 0
             if tw > widest then widest = tw end
         end
-        -- the insets eat exactly 26 (8 text + 18 chevron), so rounding
-        -- DOWN left the text sitting on the bound - round up and keep a
-        -- few pixels of slack so it can never touch it
+        -- The insets take 26 (8 text + 18 chevron): round up and keep a few
+        -- pixels of slack so the text never touches the bound.
         local want = math.ceil(widest) + 30
         if want < 80 then want = 80 end
         if want > 300 then want = 300 end
         b:SetWidth(want)
     end
 
-    -- Refresh re-reads the value AND re-sizes to the CURRENT items. A list
-    -- that depends on the selected record is a lone placeholder at build
-    -- time, and a field sized only then stayed too narrow until the first
-    -- open re-measured it (v14, Arc: "not big enough to fit the biggest
-    -- text, yet fixed as soon as I open it"). LayoutPage calls Refresh on
-    -- every sync through row._sync, so the width follows the live list.
+    -- Re-reads the value and re-sizes to the current items: a list that
+    -- depends on the selected record holds only a placeholder at build time.
+    -- LayoutPage calls this on every sync through row._sync.
     function b.Refresh()
         local cur = get()
         local items = itemsFn() or {}
@@ -727,17 +526,12 @@ function AT.MakeDropdown(owner, parent, w, itemsFn, get, set, onSelect)
     return b
 end
 
---[[ WINDOW CHROME ===========================================================]]
+-- Window chrome
 
--- Solid navy window, panel title bar ("Word1" cyan + rest light), boxed close,
--- draggable, resizable. minW/minH matter: these pages do not scroll, they CLIP.
--- Arc scroll region (canonized from Arc Pings): plain ScrollFrame, slim
--- 4px well-colored track on the right edge, proportional CYAN thumb that
--- only shows when there is overflow, mouse-wheel driven. Never use
--- UIPanelScrollFrameTemplate (stone buttons) in an Arc panel.
--- Returns host, content. Size the CONTENT's height after laying out its
--- children, then call host:UpdateScroll(). Pass an existing region (e.g.
--- a multiline EditBox) as `child` to scroll it instead of a new frame.
+-- Scroll region: a plain ScrollFrame with a thin track and a thumb shown only
+-- on overflow. Returns host, content: set the content's height after laying
+-- out its children, then call host:UpdateScroll(). Pass an existing region (a
+-- multiline EditBox) as child to scroll it instead of a new frame.
 function AT.MakeScroll(parent, child)
     local host = CreateFrame("ScrollFrame", nil, parent)
     local content = child or CreateFrame("Frame", nil, host)
@@ -794,14 +588,8 @@ function AT.CreateWindow(globalName, opts)
     local p = CreateFrame("Frame", globalName, UIParent, "BackdropTemplate")
     p:SetSize(math.max(minW, opts.w or 460), math.max(minH, opts.h or 540))
     p:SetPoint("CENTER", 0, 40)
-    -- PIXEL-PERFECT SCALE (the ElvUI strategy - the structural hairline
-    -- fix): scale the window so ONE unit inside it equals ONE physical
-    -- pixel. A 1px line then always occupies exactly one pixel row, at any
-    -- position and any panel size - it cannot vanish, tremble, or soften.
-    -- SnapWindow keeps the origin on the grid; inside, integer math IS
-    -- pixel math. Re-applied when the resolution or UI scale changes.
-    -- the size this window was DESIGNED at drives its own fit and its own
-    -- clamp; without it every window would be scaled as if it were 460x540
+    -- Pages clip rather than scroll, so minW / minH matter. The design size
+    -- drives this window's own fit and clamp (AT.FitScale).
     p._designW = math.max(minW, opts.w or 460)
     p._designH = math.max(minH, opts.h or 540)
     p:SetScale(AT.ScaleFor(p))
@@ -868,18 +656,16 @@ function AT.CreateWindow(globalName, opts)
         local sizing
         grip:SetScript("OnMouseDown", function()
             AT.CloseDropdown()
-            -- PIN THE TOP-LEFT FIRST. A CENTER-anchored frame grows symmetrically,
-            -- so sizing from the corner lurches the whole window.
+            -- Pin the top-left first: a CENTER-anchored frame grows
+            -- symmetrically, so sizing from the corner would lurch the window.
             local l, t = p:GetLeft(), p:GetTop()
             if l and t then
                 p:ClearAllPoints()
                 p:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", l, t)
             end
-            -- MANUAL SIZING, never StartSizing: on a pixel-scaled window
-            -- (SetScale(AT.Px)) the client can compute StartSizing's grab
-            -- offset in the wrong coordinate space and the frame BALLOONS
-            -- the moment the drag begins. Cursor deltas divided by the
-            -- window's own effective scale are exact in any scale.
+            -- Manual sizing instead of StartSizing: on a scaled window the
+            -- client can compute StartSizing's grab offset in the wrong
+            -- coordinate space, and the frame balloons as the drag begins.
             local cx, cy = GetCursorPosition()
             sizing = { w = p:GetWidth(), h = p:GetHeight(), x = cx, y = cy }
             local maxW, maxH = opts.maxW or 900, opts.maxH or 1000
@@ -903,16 +689,14 @@ function AT.CreateWindow(globalName, opts)
             if p.RefreshActive then p:RefreshActive() end
         end)
     end
-    -- Frames spawn SHOWN. A toggle-style opener (if IsShown then Hide) sees
-    -- the brand-new window as open and immediately closes it, costing the
-    -- user a second slash command (the Arc Bonus Roll two-/abr bug). A
-    -- window is created closed; the caller shows it.
+    -- Frames are created shown, so a toggle-style opener would close the new
+    -- window at once. It starts hidden; the caller shows it.
     p:Hide()
     return p
 end
 
--- Chip tabs sitting on a CONTINUOUS cyan line. tabs = { "General", "Alerts" }.
--- Returns a select(name) function; pages are created by the caller via NewPage.
+-- Chip tabs on one continuous cyan line. tabs = { "General", "Alerts" }; the
+-- caller makes each pages[name] with NewPage. Returns select(name).
 function AT.AddTabs(p, tabs, pages, y)
     y = y or -34
     p._tabs = {}
@@ -969,13 +753,12 @@ function AT.AddTabs(p, tabs, pages, y)
     return select
 end
 
---[[ ROW ENGINE ==============================================================]]
+-- Row engine
 
 function AT.NewPage(parent)
     local pg = CreateFrame("Frame", nil, parent)
-    -- ONE page = ONE panel (the ArcSkin win.page law): a flat panel-colored
-    -- body that section boxes nest inside - never floating boxes on bare
-    -- window background
+    -- One flat panel-colored body per page, so section boxes nest inside it
+    -- instead of floating on the bare window background.
     pg._bg = pg:CreateTexture(nil, "BACKGROUND", nil, -8)
     pg._bg:SetTexture(WHITE)
     pg._bg:SetVertexColor(COL.panel[1], COL.panel[2], COL.panel[3], 1)
@@ -991,6 +774,9 @@ function AT.AddRow(pg, h, visibleFn)
     local row = CreateFrame("Frame", nil, (sec and sec.box) or pg)
     h = h or LAY.rowH
     row:SetHeight(h); row._h = h; row._visibleFn = visibleFn
+    -- The row's page, so a control that had to guess its size on the first
+    -- pass (a tab strip) can ask for the next-frame re-pass.
+    row._pg = pg
     row._ctrlX = (sec and sec.ctrlX) or LAY.ctrl
     if sec then sec.rows[#sec.rows + 1] = row else pg._rows[#pg._rows + 1] = row end
     return row
@@ -1004,15 +790,10 @@ function AT.RowLabel(row, text)
     return fs
 end
 
--- ── tab strip (the ArcSkin/ProcTracker painter, ported exactly) ─────────────
--- Physical chips on ONE arc-cyan attach line spanning the strip. Z-order does
--- the classic-attached-tab trick: unselected chips sit UNDER the line (+1) so
--- it covers their bottom edges, the line lives at +2, and the selected chip
--- rises ABOVE it (+3) with a window-bg fill and no bottom edge, so it notches
--- through and opens into the page below. Chips wrap to a second row when the
--- strip is too narrow (same maxW guard as ArcSkin). Set() is pool-based and
--- idempotent - call it from a _sync on every refresh. fontSize: 12 = main
--- row, 11 = sub/section rows. All edges are 1px strips, DEFAULT sampling.
+-- Tab strip: chips on one cyan line. Unselected chips sit under the line (+1)
+-- so it hides their bottom edges; the selected one sits above it (+3) with no
+-- bottom edge, opening into the page below. Chips wrap when the strip is too
+-- narrow. Set() is pooled and idempotent: call it from a _sync.
 function AT.TabRow(parent)
     local strip = CreateFrame("Frame", nil, parent)
     strip._tabs = {}
@@ -1040,24 +821,27 @@ function AT.TabRow(parent)
     end
     function strip:Set(names, active, onClick, fontSize)
         self._lineF:SetFrameLevel(self:GetFrameLevel() + 2)
-        -- what the selected chip "opens into": window bg by default
-        -- (ArcSkin's context), the page panel when the strip lives inside a
-        -- panel-bodied page (set strip._openFill = COL.panel there)
+        -- The selected chip's fill: the window bg, or set strip._openFill =
+        -- COL.panel when the strip sits on a panel-bodied page.
         local open = self._openFill or COL.bg
         local chipH = 24
         local x, rowY = 0, 0
-        -- usable width: on the FIRST layout pass the strip (and its row)
-        -- have no resolved size yet - walk up to the page, which is
-        -- anchored at Build time. A wrong fallback here wrapped the chips
-        -- over the content on first open.
-        local maxW
+        -- On the first layout pass the strip has no width yet, so walk up the
+        -- parents. Only the strip's own width is reliable: a parent's can be
+        -- wider, and the 500 fallback is a number. Either counts as a guess.
+        local maxW, guessed
         local probe = self
-        for _ = 1, 4 do
+        for depth = 1, 4 do
             if not probe then break end
             local w = probe:GetWidth()
-            if w and w > 50 then maxW = w break end
+            if w and w > 50 then
+                maxW = w
+                if depth > 1 then guessed = true end
+                break
+            end
             probe = probe:GetParent()
         end
+        if not maxW then guessed = true end
         maxW = (maxW or 500) - 4
         for i = 1, math.max(#names, #self._tabs) do
             local name, tb = names[i], self._tabs[i]
@@ -1080,7 +864,14 @@ function AT.TabRow(parent)
                     tb:SetHeight(chipH)
                     tb.fs:SetFont(STANDARD_TEXT_FONT, fontSize or 12, "")
                     tb.fs:SetText(name)
-                    local w = math.floor((tb.fs:GetStringWidth() or 40) + 24 + 0.5)
+                    -- A FontString can measure 0 right after SetFont:
+                    -- estimate, and count it as a guess.
+                    local sw = tb.fs:GetStringWidth()
+                    if type(sw) == "number" and sw <= 0 then
+                        sw = #name * (fontSize or 12) * 0.55
+                        guessed = true
+                    end
+                    local w = math.floor((sw or 40) + 24 + 0.5)
                     tb:SetWidth(w)
                     if x + w > maxW and x > 0 then x = 0; rowY = rowY - (chipH + 4) end
                     tb:ClearAllPoints()
@@ -1120,23 +911,31 @@ function AT.TabRow(parent)
                 end
             end
         end
-        -- pin the attach line to the LAST chip row's bottom edge (1px up,
-        -- so it overlays chip bottoms exactly like ArcSkin's yOff - 1)
+        -- Pin the line to the last chip row's bottom edge, 1px up so it
+        -- overlays the chip bottoms.
         local h = -rowY + chipH
         self._lineF:ClearAllPoints()
         self._lineF:SetPoint("TOPLEFT", 0, -(h - 1))
         self._lineF:SetPoint("TOPRIGHT", 0, -(h - 1))
-        return h
+        -- A guess lays the page out again on the next frame (LayoutPage's
+        -- capped re-pass). Only for a row that will show: a hidden one would
+        -- use up the page's three tries.
+        if guessed then
+            local row = self:GetParent()
+            local pg = row and row._pg
+            if pg and ((not row._visibleFn) or row._visibleFn()) then
+                pg._sizeUnresolved = true
+            end
+        end
+        return h, guessed == true
     end
     return strip
 end
 
 function AT.Tooltip(region, title, body)
     region:HookScript("OnEnter", function(self)
-        -- a dynamic body that answers nil means "no tooltip right now".
-        -- Resolved in two steps on purpose: `f() or body` hands back the
-        -- FUNCTION when f() is nil, and a title-only tooltip appeared on
-        -- every row whose body said nil (v13, Arc UI v2 rail, 2026-09-23)
+        -- A body function that returns nil means no tooltip right now. Two
+        -- steps on purpose: `f() or body` would hand back the function.
         local b = body
         if type(b) == "function" then b = b() end
         if type(b) ~= "string" or b == "" then return end
@@ -1151,21 +950,15 @@ function AT.Tooltip(region, title, body)
     region:HookScript("OnLeave", function() GameTooltip:Hide() end)
 end
 
--- COLLAPSIBLE SECTION. A 22px header bar the width of the box: the arrow at
--- the LEFT with the title right after it (Arc, 2026-09-22: "just like ArcUI's
--- own drop down" - v1's CollapsibleHeader puts its arrow 4px in and the text
--- 6px after it; the old arrow-pinned-RIGHT rule is retired), whole bar
--- clickable. Right = shut, down = open. Collapsed, the bar keeps a cyan
--- underline so a shut section still reads as Arc.
---   opts = { visibleFn, side = "L"/"R", ctrlX, collapsible = false, store = table }
--- `store` is any table you own; the open/shut state is saved under the title.
+-- opts = { visibleFn, side = "L"/"R", ctrlX, collapsible = false, store = table }
+-- A collapsible section has a clickable header bar, arrow on the left; shut,
+-- it keeps a cyan underline. Its open/shut state is saved in `store` (any
+-- table you own) under the title.
 function AT.Section(pg, text, opts)
     opts = opts or {}
     local titled = (text ~= nil and text ~= "")
-    -- SOLID PAGE law (Arc, 2026-09-16, supersedes boxed sections): the page
-    -- is ONE continuous panel like WoW/WeakAuras options - sections are
-    -- INVISIBLE layout containers, separated by their uppercase cyan
-    -- headers and row spacing, never by cut-out boxes
+    -- A plain section is an invisible layout container on the page's one
+    -- panel, set apart by its header and spacing rather than a box.
     local box = CreateFrame("Frame", nil, pg, "BackdropTemplate")
     box:SetClipsChildren(true)
     local sec = {
@@ -1173,16 +966,10 @@ function AT.Section(pg, text, opts)
         ctrlX = opts.ctrlX or LAY.ctrl, collapsed = false, f = 1, store = opts.store,
     }
     if titled and opts.collapsible then
-        -- A COLLAPSIBLE SECTION IS A BOX (Arc, 2026-09-19: "when you do a drop
-        -- down like this you should be making like a window of itself and the
-        -- items are inside this window"). This is a deliberate carve-out from
-        -- the SOLID PAGE law, which still governs every plain titled section:
-        -- a thing you open and shut has to show what it contains.
+        -- A collapsible section is a real box: something you open and shut
+        -- has to show what it contains.
         local bar = CreateFrame("Button", nil, pg, "BackdropTemplate")
         bar:SetHeight(LAY.hdr); Skin(bar, COL.panel, COL.line)
-        -- THE ONE ARROW: the drawn Arc chevron, never a Blizzard atlas and
-        -- never a text caret (the one-arrow law, same glyph as the rail),
-        -- LEFT, with the title after it
         local arrow = AT.MakeChevron(bar)
         arrow:SetPoint("LEFT", 7, 0)
         local title = bar:CreateFontString(nil, "OVERLAY")
@@ -1234,7 +1021,6 @@ function AT.Section(pg, text, opts)
                         if s.page then pages[s.page] = true end
                     end
                     for p2 in pairs(pages) do AT.LayoutPage(p2) end
-                    -- ZERO IDLE COST: the driver dies the moment nothing moves
                     if not any then drv:SetScript("OnUpdate", nil); AT.animDriver = nil end
                 end)
             end
@@ -1243,43 +1029,30 @@ function AT.Section(pg, text, opts)
             sec.collapsed, sec.f = true, 0
         end
     elseif titled then
-        -- ArcSkin boxtitle law: cyan, font 10, ALWAYS uppercase
         local t = pg:CreateFontString(nil, "OVERLAY")
         t:SetFont(STANDARD_TEXT_FONT, 10, "")
         t:SetTextColor(COL.arc[1], COL.arc[2], COL.arc[3])
         t:SetText(string.upper(text))
         sec.title = t
-        -- THE SECTION RULE (v8). A 10px uppercase title alone does not read as
-        -- a boundary - the page comes out as one undifferentiated pile with
-        -- controls and buttons in it. Blizzard's own options give every
-        -- section a heavy heading and real whitespace, and that is the whole
-        -- reason theirs scans. This is the flat Arc equivalent: a hairline
-        -- under the title, spanning the section, so each block has a visible
-        -- top edge. Cheap, quiet, and it does all the structural work.
+        -- A 10px title alone doesn't read as a boundary, so a hairline under
+        -- it spans the section and gives the block a visible top edge.
         local hr = pg:CreateTexture(nil, "ARTWORK")
         hr:SetTexture(WHITE)
         hr:SetVertexColor(COL.line2[1], COL.line2[2], COL.line2[3], 1)
         sec.hr = hr
-        -- NO BUTTONS ON A SECTION TITLE (Arc, 2026-09-23). v7 briefly put a
-        -- section's action on its header line, right-aligned. It was wrong:
-        -- a header sits directly under the PREVIOUS section's content, so a
-        -- button there reads as belonging to the title, or to the block above,
-        -- and Arc could not tell which section owned it. Blizzard never do it
-        -- either - their buttons live in the content, under the heading.
-        -- Actions go in ROWS, aligned to the control column, via AT.RowButton.
+        -- No buttons on a section title: a header sits right under the
+        -- previous section's content, so a button there has no clear owner.
+        -- Actions go in rows (AT.RowButton).
     end
     pg._sections[#pg._sections + 1] = sec
     pg._curSection = sec
     return box
 end
 
--- ── page scrolling ──────────────────────────────────────────────────────────
--- Scrolls a page IN PLACE - no ScrollFrame, no scroll child, no re-parenting.
--- LayoutPage already flows every row and section from pg._startY, so the whole
--- mechanism is "offset _startY and clip the page". That matters because pages
--- here get re-parented and re-anchored at runtime (the icon editor moves
--- between the group and free panes); a real scroll child would have to be
--- chased around, an offset does not.
+-- Page scrolling in place: LayoutPage flows everything from pg._startY, so a
+-- scroll offsets _startY and clips the page. Pages get re-parented at runtime
+-- (the icon editor moves between panes), which a scroll child would have to
+-- follow; an offset doesn't care.
 function AT.MakeScrollable(pg)
     if not pg or pg._scroll then return pg end
     pg:SetClipsChildren(true)
@@ -1306,10 +1079,8 @@ function AT.MakeScrollable(pg)
         paint = function()
             local over, viewH = overflow()
             if over <= 1 or viewH <= 0 then track:Hide() return end
-            -- re-asserted every paint, not set once: a page that gets
-            -- re-parented (the icon editor moves between panes) takes a new
-            -- base level with it, and a level fixed at build time would sink
-            -- under the rows
+            -- Set on every paint: a re-parented page takes a new base level,
+            -- and a level fixed at build time would sink under the rows.
             track:SetFrameLevel(pg:GetFrameLevel() + 30)
             track:Show()
             local th = math.max(20, viewH * (viewH / (pg._contentH or viewH)))
@@ -1334,14 +1105,15 @@ function AT.MakeScrollable(pg)
     return pg
 end
 
--- Flow rows, size each box to its VISIBLE rows, and place every single-control
--- row's control on ONE column measured per section.
+-- Flows the rows, sizes each box to its visible rows and aligns controls on
+-- one column per section; call it after anything shows or hides a row. Each
+-- pass runs row._sync (builders set it; custom rows set their own) and hides
+-- any row or section whose visibleFn returns false.
 function AT.LayoutPage(pg)
     if not (pg and pg._sections) then return end
     if pg._scroll then
-        -- clamp against the LAST measured content: the wheel handler already
-        -- clamps live, so a one-pass-stale bound here only ever shows up when
-        -- content shrinks under the scroll, and the next layout corrects it
+        -- Clamped against the last measured content; it is one pass stale only
+        -- when content shrinks under the scroll, and the next pass fixes it.
         local over = pg._scroll.overflow()
         local off = pg._scrollOff or 0
         if off > over then off = over elseif off < 0 then off = 0 end
@@ -1368,9 +1140,8 @@ function AT.LayoutPage(pg)
             if side == "L" then pairTopY, pairBottomY = y, y
             elseif side == "R" then pairTopY, pairBottomY = nil, nil end
         else
-            -- a section whose rows are ALL hidden paints nothing: no title,
-            -- no empty box sliver, no gap (ArcSkin's anyVisible rule - the
-            -- "random empty boxes" class of bug)
+            -- A section with every row hidden paints nothing: no title, no
+            -- empty box, no gap.
             local anyVis = false
             for _, r in ipairs(sec.rows) do
                 if (not r._visibleFn) or r._visibleFn() then anyVis = true break end
@@ -1397,11 +1168,8 @@ function AT.LayoutPage(pg)
             end
             if sec.hit then
                 span(sec.hit, topY); sec.hit:Show(); hdrH = LAY.hdr
-                -- THE TITLE COMES BACK WITH ITS BAR (Arc, 2026-09-22: headers
-                -- with no names). A hidden section hides sec.title as well as
-                -- the bar, and this branch used to re-show only the bar, so a
-                -- collapsible section lost its name for good after the first
-                -- pass it spent hidden - i.e. after any tab switch.
+                -- A hidden section hides its title too; show it again with
+                -- the bar.
                 if sec.title then sec.title:Show() end
                 sec.arrow:SetDown(not sec.collapsed)
                 sec.rule:SetShown(sec.collapsed)
@@ -1410,8 +1178,6 @@ function AT.LayoutPage(pg)
                 if side == "R" then sec.title:SetPoint("TOPLEFT", pg, "TOP", 12, topY - 2)
                 else sec.title:SetPoint("TOPLEFT", 12, topY - 2) end
                 sec.title:Show(); hdrH = LAY.hdr
-                -- the rule sits under the title and spans the section, giving
-                -- the block a visible top edge (see THE SECTION RULE)
                 if sec.hr then
                     span(sec.hr, topY - hdrH + 5)   -- same edges as the box
                     sec.hr:SetHeight(AT.Hairline(pg))
@@ -1421,16 +1187,13 @@ function AT.LayoutPage(pg)
             local boxTop = topY - hdrH
             span(sec.box, boxTop)
 
-            -- SYNC BEFORE MEASURING. A row whose label text only arrives in
-            -- _sync (every dynamic list row) was otherwise measured while still
-            -- EMPTY, so the control column came out at ~26px and the label
-            -- rendered as ".." until some later layout re-measured it.
+            -- Sync before measuring: a label that arrives in _sync would
+            -- otherwise be measured empty and squeeze the column.
             for _, r in ipairs(sec.rows) do
                 if r._sync then r._sync() end
             end
-            -- CONTROL COLUMN, measured. Use the UNBOUNDED width: GetStringWidth
-            -- reports the already-truncated width, so a truncated label would feed
-            -- a smaller column back in on the next pass and ratchet down.
+            -- Unbounded width: GetStringWidth reports the truncated width,
+            -- and the column would ratchet down pass after pass.
             local col
             for _, r in ipairs(sec.rows) do
                 if r._colLabel and ((not r._visibleFn) or r._visibleFn()) then
@@ -1451,14 +1214,9 @@ function AT.LayoutPage(pg)
                 else row:Hide() end
             end
             if col then
-                -- An anchored frame has NO real width until the client lays it
-                -- out, so on the first pass after a panel is built the box
-                -- measures 0. The old code just skipped the cap ("until real")
-                -- and nothing ever re-ran, which is why a wide button stayed
-                -- clipped until the window was resized by hand.
-                -- FIRST: derive the width from the PAGE, whose size comes from
-                -- the window's explicit SetSize, using the same insets span()
-                -- applies. That resolves it immediately in almost every case.
+                -- An anchored frame has no width until the client lays it
+                -- out, so on the first pass the box measures 0. Derive it
+                -- from the page (sized by the window) with span()'s insets.
                 local bw = sec.box:GetWidth() or 0
                 if bw <= 60 then
                     local pw = pg:GetWidth() or 0
@@ -1466,16 +1224,11 @@ function AT.LayoutPage(pg)
                         bw = (side and (pw / 2) or pw) - 12
                     end
                 end
-                -- SECOND: if it still is not known, ask for one more pass on
-                -- the next frame rather than leaving the panel wrong.
+                -- Still unknown: ask for one more pass on the next frame.
                 if bw <= 60 then pg._sizeUnresolved = true end
                 if bw > 60 then
-                    -- CAP AGAINST THE WIDEST CONTROL, not a fixed 34. That
-                    -- constant assumed every control was a checkbox, so a wide
-                    -- action button ("Clear all queueing abilities", 190px)
-                    -- placed at a column measured from long labels ran past
-                    -- the section edge and SetClipsChildren sliced its right
-                    -- side off. Any control on the column must fit.
+                    -- Cap the column so the widest control fits: the box
+                    -- clips its children, so an overhanging one is cut off.
                     local widest = 34
                     for _, r in ipairs(sec.rows) do
                         if r._colCtrl and ((not r._visibleFn) or r._visibleFn()) then
@@ -1490,8 +1243,8 @@ function AT.LayoutPage(pg)
                     if r._colCtrl then
                         r._colCtrl:ClearAllPoints()
                         r._colCtrl:SetPoint("LEFT", r, "LEFT", col, 0)
-                        -- _colFill = true: fill to the ROW's right edge
-                        -- (inputs); a frame: stop at that frame (sliders)
+                        -- _colFill = true stretches the control to the row's
+                        -- right edge; a frame stops it at that frame.
                         if r._colFill == true then
                             r._colCtrl:SetPoint("RIGHT", r, "RIGHT", -12, 0)
                         elseif r._colFill then
@@ -1513,20 +1266,14 @@ function AT.LayoutPage(pg)
             end
         end
     end
-    -- add the scroll offset back: _contentH is the FULL laid-out height, not
-    -- what is left below the current scroll position
+    -- _contentH is the full laid-out height, so add the scroll offset back.
     pg._contentH = -y + 8 + (pg._scrollOff or 0)
     if pg._scroll then pg._scroll.paint() end
 
-    -- SELF-CORRECTING FIRST PASS. Something was laid out against a width the
-    -- client had not resolved yet, so this pass used a fallback. Run once more
-    -- on the next frame, when the real sizes exist. Guarded so it can only
-    -- ever queue one re-pass, and the flag clears before the re-pass so a
-    -- genuinely unresolvable page (a hidden panel) cannot spin.
-    -- CAPPED. A page that can never resolve (hidden, zero-width parent) must
-    -- not re-queue for ever - that would be a permanent timer burning CPU for
-    -- nothing. Three frames is far more than the one it actually takes, and
-    -- the count resets whenever a pass succeeds.
+    -- Something was laid out against an unresolved width, so run once more
+    -- on the next frame. One re-pass is queued at a time, three in a row at
+    -- most, so a page that can never resolve (hidden, zero-width parent)
+    -- doesn't spin. The count resets after a pass that resolves.
     if pg._sizeUnresolved then
         if not pg._relayoutQueued and (pg._relayoutTries or 0) < 3 then
             pg._relayoutQueued = true
@@ -1542,10 +1289,10 @@ function AT.LayoutPage(pg)
     end
 end
 
---[[ ROW BUILDERS ============================================================]]
+-- Row builders
 
--- Checkbox sits NEXT TO its label (LayoutPage then column-aligns it), whole row
--- clickable, description as a hover TOOLTIP and never an inline row.
+-- The checkbox sits next to its label until LayoutPage aligns it to the
+-- column. The whole row clicks; desc becomes a hover tooltip.
 function AT.RowToggle(pg, label, get, set, visibleFn, desc)
     local row = AT.AddRow(pg, LAY.rowH, visibleFn)
     local lbl = AT.RowLabel(row, label)
@@ -1563,8 +1310,8 @@ function AT.RowToggle(pg, label, get, set, visibleFn, desc)
     row:EnableMouse(true); row:SetScript("OnMouseUp", flip)
     row:HookScript("OnEnter", function() cb:SetHover(true) end)
     row:HookScript("OnLeave", function() cb:SetHover(false) end)
-    -- the checkbox is a child Button that EATS mouse events: hover glow and
-    -- tooltip must be hooked on it too, or the toggle itself is a dead zone
+    -- The checkbox is a child Button that takes the mouse, so hover and the
+    -- tooltip are hooked on it too.
     cb:HookScript("OnEnter", function() cb:SetHover(true) end)
     cb:HookScript("OnLeave", function() cb:SetHover(false) end)
     if desc then AT.Tooltip(row, label, desc); AT.Tooltip(cb, label, desc) end
@@ -1573,16 +1320,15 @@ function AT.RowToggle(pg, label, get, set, visibleFn, desc)
     return row
 end
 
--- desc and hint may each be a string OR a function (live text). hint draws dim
--- placeholder text INSIDE the box while empty: use it to show what is in effect
--- without PRE-FILLING, which would turn "I left it alone" into a saved value.
--- live = true commits on every USER keystroke/paste (not just focus lost), for
--- fields that feed a derived row (e.g. a link the next row transforms).
+-- desc and hint may be strings or functions. hint is dim placeholder text
+-- shown while the box is empty: it shows what is in effect without
+-- pre-filling, which would save a value the user never set. live = true
+-- commits on every user keystroke or paste, not only on focus lost.
 function AT.RowInput(pg, label, get, set, visibleFn, desc, hint, live)
     local row = AT.AddRow(pg, LAY.rowH, visibleFn)
     local lbl = AT.RowLabel(row, label)
-    -- inputs sit ON the shared control column (the locked template forbids
-    -- far-edge pinning: the field drifts away from the word it belongs to)
+    -- A fixed 160 wide on the control column, not pinned to the row's far
+    -- edge where the field drifts away from its label.
     local box = CreateFrame("EditBox", nil, row, "BackdropTemplate")
     box:SetSize(160, 18); box:SetPoint("LEFT", row._ctrlX, 0); Skin(box, COL.well)
     box:SetFont(STANDARD_TEXT_FONT, 11, ""); box:SetTextInsets(6, 6, 0, 0)
@@ -1606,17 +1352,13 @@ function AT.RowInput(pg, label, get, set, visibleFn, desc, hint, live)
         syncHint()
         if live and userInput then set(self:GetText() or "") end
     end)
-    -- the tooltip must be hooked on the BOX too: it is a child that eats mouse
-    -- events, so a row-only hook shows nothing when you hover the field
+    -- The box takes the mouse too, so the tooltip is hooked on it as well.
     if desc then AT.Tooltip(row, label, desc); AT.Tooltip(box, label, desc) end
     local function commit() set(box:GetText() or ""); box:SetText(get() or ""); syncHint() end
     box:SetScript("OnEnterPressed", function() box:ClearFocus() end)
     box:SetScript("OnEscapePressed", function() box:SetText(get() or ""); box:ClearFocus() end)
     box:SetScript("OnEditFocusGained", function() box:SetBackdropBorderColor(COL.arcDeep[1], COL.arcDeep[2], COL.arcDeep[3], 1) end)
     box:SetScript("OnEditFocusLost", function() commit(); box:SetBackdropBorderColor(COL.line[1], COL.line[2], COL.line[3], 1) end)
-    -- inputs sit on the measured control column like every other control,
-    -- at the FIXED ArcSkin field width - never filled to the row edge
-    -- (Arc: a full-width box is "too much"; the template agrees at 160)
     row._colLabel, row._colCtrl = lbl, box
     row._sync = function()
         if not box:HasFocus() then box:SetText(get() or "") end
@@ -1661,17 +1403,17 @@ function AT.RowColor(pg, label, get, set, visibleFn)
     return row
 end
 
--- Slider FILLS the space between the column and the stepper, so it grows with
--- the box and never leaves dead air or clips in a narrow one.
+-- A fixed, Blizzard-length slider with a [-][value][+] stepper after it.
+-- minV and maxV may be functions, re-read on every sync, so the range can
+-- follow the record.
 function AT.RowSlider(pg, label, get, set, minV, maxV, step, isPct, visibleFn)
     local row = AT.AddRow(pg, LAY.rowH, visibleFn)
     local lbl = AT.RowLabel(row, label)
     local s = CreateFrame("Slider", nil, row, "BackdropTemplate")
     local box = CreateFrame("EditBox", nil, row, "BackdropTemplate")
     local settingUp = true
-    -- isPct: true = a 0..1 value shown as a percent; a FORMAT STRING (e.g.
-    -- "%.2f") = the raw value shown with it, typed values taken as-is (for
-    -- fine-step units like seconds that a percent display would misread)
+    -- isPct: true shows a 0-1 value as a percent; a format string ("%.2f")
+    -- shows the raw value with it and takes typed values as they are.
     local fmtStr = type(isPct) == "string" and isPct or nil
     if fmtStr then isPct = false end
     local function fmt(v)
@@ -1681,9 +1423,6 @@ function AT.RowSlider(pg, label, get, set, minV, maxV, step, isPct, visibleFn)
         elseif step < 1 then return ("%.1f"):format(v)
         else return ("%d"):format(math.floor(v + 0.5)) end
     end
-    -- LIVE BOUNDS (v12): minV / maxV may be FUNCTIONS, re-read on every
-    -- refresh, so a range can follow the record; the slider's own range is
-    -- re-applied on every sync
     local function bounds()
         local lo = (type(minV) == "function") and minV() or minV
         local hi = (type(maxV) == "function") and maxV() or maxV
@@ -1730,8 +1469,6 @@ function AT.RowSlider(pg, label, get, set, minV, maxV, step, isPct, visibleFn)
     box:SetScript("OnEnterPressed", function(self) commitTyped(self); self:ClearFocus() end)
     box:SetScript("OnEditFocusLost", commitTyped)
     box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    -- Blizzard-length: a FIXED slider with the stepper cluster trailing it,
-    -- never a row-filling bar (the "massive sliders" report)
     s:SetOrientation("HORIZONTAL"); s:SetHeight(10)
     s:SetWidth(LAY.sliderW)
     s:SetPoint("LEFT", row._ctrlX, 0)
@@ -1755,15 +1492,9 @@ function AT.RowSlider(pg, label, get, set, minV, maxV, step, isPct, visibleFn)
     return row
 end
 
--- An action row. THE BUTTON SITS ON THE CONTROL COLUMN, exactly like a
--- toggle's checkbox or a dropdown, so it lines up with every other control on
--- the page instead of floating at its own left offset - that floating was what
--- made panels read as "random buttons around" (Arc, 2026-09-23).
---
--- rowLabel (optional) puts explanatory text on the left, which is the form to
--- prefer: "Pick the abilities that queue it   [ Pick on my bars ]" reads as a
--- row of the section, where a lone button reads as loose furniture.
--- quiet = true for destructive or secondary actions.
+-- An action row: the button sits on the control column like any control.
+-- rowLabel (optional, preferred) puts text on the left so the row reads as
+-- part of its section; quiet = true for secondary or destructive actions.
 function AT.RowButton(pg, label, onClick, visibleFn, w, rowLabel, quiet)
     local row = AT.AddRow(pg, LAY.rowH, visibleFn)
     local b = (quiet and AT.MakeQuietButton or AT.MakeSmallButton)(row, label, w or 150)
@@ -1772,22 +1503,15 @@ function AT.RowButton(pg, label, onClick, visibleFn, w, rowLabel, quiet)
         local lbl = AT.RowLabel(row, rowLabel)
         row._colLabel = lbl
     end
-    -- LayoutPage pins _colCtrl to the measured column; a row with no label
-    -- still aligns there, so a bare button never invents a third margin
+    -- LayoutPage pins _colCtrl to the column, label or not.
     row._colCtrl = b
     row.button = b
     return row
 end
 
--- ACTION ROW: several buttons on ONE line, evenly spaced, aligned to one edge.
---
--- THE GROUPED-ACTION LAW: stacking N separate RowButtons puts N buttons of N
--- widths down the left margin with content rows between them, which is what
--- makes a panel look like scattered controls. Actions that belong together go
--- on one line, share a width, and sit at a predictable edge.
---
--- list  = { { label, onClick, quiet = bool, visibleFn = fn, w = n }, ... }
--- align = "right" (default, the dialog-footer read) or "left"
+-- Several related buttons on one line, aligned to one edge.
+-- list = { { label = s, onClick = fn, quiet = bool, visibleFn = fn, w = n }, ... }
+-- align = "right" (default) or "left"
 function AT.RowActions(pg, list, align, visibleFn)
     local row = AT.AddRow(pg, LAY.rowH + 4, visibleFn)
     local made = {}
@@ -1796,8 +1520,7 @@ function AT.RowActions(pg, list, align, visibleFn)
         b:SetScript("OnClick", function() AT.CloseDropdown() spec.onClick() end)
         made[i] = { btn = b, vis = spec.visibleFn }
     end
-    -- re-laid every pass so a button appearing or vanishing re-packs the row
-    -- instead of leaving a hole where it used to be
+    -- Re-packed every pass, so a button showing or hiding leaves no hole.
     row._sync = function()
         local shown = {}
         for _, m in ipairs(made) do
@@ -1820,8 +1543,7 @@ function AT.RowActions(pg, list, align, visibleFn)
     return row
 end
 
--- a hairline between logical blocks inside one section, for when a section has
--- two distinct parts but does not deserve two headers
+-- A hairline between two parts of one section that don't need two headers.
 function AT.RowDivider(pg, visibleFn)
     local row = AT.AddRow(pg, 9, visibleFn)
     local line = row:CreateTexture(nil, "ARTWORK")
@@ -1842,16 +1564,12 @@ function AT.RowDesc(pg, text, h, visibleFn)
     fs:SetJustifyH("LEFT"); fs:SetJustifyV("TOP")
     fs:SetWordWrap(true)
     fs:SetTextColor(COL.dim[1], COL.dim[2], COL.dim[3]); fs:SetText(text)
-    -- AUTO-HEIGHT: long descriptions wrap, and the row grows to hold every
-    -- line (the passed h is a MINIMUM) - text must never bleed into the
-    -- next row. Width comes from the page: the row itself is unsized on
-    -- the first pass.
+    -- The text wraps and the row grows to hold it (h is a minimum). The width
+    -- comes from the page: the row itself is unsized on the first pass.
     row._minH = h or LAY.descH
     row._sync = function()
         local w = pg:GetWidth() or 0
-        -- same first-pass problem as the control column: bailing here left the
-        -- row at its minimum height and the text overflowing into the next
-        -- one. Flag it so LayoutPage re-runs once the real width exists.
+        -- No width yet: flag the page so LayoutPage runs again once it exists.
         if w < 60 then pg._sizeUnresolved = true return end
         fs:SetWidth(w - 36)
         local want = math.max(row._minH, math.floor((fs:GetStringHeight() or 12) + 8))
@@ -1860,7 +1578,7 @@ function AT.RowDesc(pg, text, h, visibleFn)
     return row
 end
 
---[[ DISCORD FOOTER ==========================================================]]
+-- Discord footer
 
 -- Addons cannot open URLs, so the button shows a copy popup with the invite
 -- selected for Ctrl+C. Reserve ~34px at the window bottom for the footer band.
@@ -1914,7 +1632,7 @@ function AT.AddDiscordFooter(p, globalName)
     return b
 end
 
--- mock-addon export (replaces the canonical file's trailing return, which a
--- toc-loaded file discards): hang AT on the private namespace instead
+-- A toc-loaded file's return value is discarded, so AT goes on the addon
+-- namespace.
 local _ADDON, NS = ...
 NS.AT = AT

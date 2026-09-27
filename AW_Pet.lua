@@ -14,6 +14,9 @@
 --    other is a no-op. A plain "/click X" (up only) does NOTHING with key-down
 --    on - the trap this dodges. /click on action buttons passes the 12.x
 --    ScriptedInput guard (only aura buttons forbid it).
+--    EXCEPT a macro slot: /click-ing it is a macro running a macro, which the
+--    engine refuses, so the macro's own body goes in place of the two /click
+--    lines (MacroBodyFor), re-copied on UPDATE_MACROS.
 --  * QUEUED NEXT-ATTACK ABILITY (optional, off by default): one more line on
 --    the same macro, "/cast [harm,nodead] !<Ability>", so a picked button also
 --    arms a next-weapon-attack ability (Raptor Strike, Heroic Strike, Maul,
@@ -197,9 +200,44 @@ end
 -- a button needs an overlay if EITHER job is live on it
 local function ActiveOn(name) return PetOn(name) or QueueOn(name) end
 
+-- A MACRO slot cannot be pressed with /click: that is one macro running
+-- another, and the engine silently refuses it, so a picked macro button did
+-- nothing but send the pet. Its body is copied into the overlay's own macro
+-- instead. "#" lines (#showtooltip and friends) only drive the icon and are
+-- dropped. GetActionInfo hands back the macro's resolved SPELL on this engine,
+-- not its index, so the macro is found by the name the slot shows. nil = not a
+-- macro slot (or the macro is gone), and the caller falls back to /click.
+local function MacroBodyFor(name)
+    local b = _G[name]
+    local slot = b and b.action
+    if not slot or not HasAction(slot) then return nil end
+    if GetActionInfo(slot) ~= "macro" then return nil end
+    local macroName = GetActionText(slot)
+    if not macroName or macroName == "" then return nil end
+    local idx = GetMacroIndexByName and GetMacroIndexByName(macroName)
+    if not idx or idx == 0 then
+        idx = nil
+        for i = 1, (MAX_ACCOUNT_MACROS or 120) + (MAX_CHARACTER_MACROS or 18) do
+            if GetMacroInfo(i) == macroName then idx = i break end
+        end
+    end
+    local body = idx and select(3, GetMacroInfo(idx))
+    if not body then return nil end
+    local lines = {}
+    for line in body:gmatch("[^\r\n]+") do
+        if not line:match("^%s*#") and line:match("%S") then lines[#lines + 1] = line end
+    end
+    return table.concat(lines, "\n")
+end
+
 local function MacroFor(name, mouse)
     local macro = PetOn(name) and "/petattack [pet,@target,harm,nodead]\n" or ""
-    macro = macro .. ("/click %s %s 1\n/click %s %s 0"):format(name, mouse, name, mouse)
+    local body = MacroBodyFor(name)
+    if body then
+        macro = macro .. body
+    else
+        macro = macro .. ("/click %s %s 1\n/click %s %s 0"):format(name, mouse, name, mouse)
+    end
     -- the queued next-attack ability, LAST and with the mandatory "!" (see the
     -- header). [harm,nodead] mirrors the petattack line so a press with nothing
     -- hostile targeted does not throw a red error.
@@ -715,6 +753,8 @@ ev:SetScript("OnEvent", function(_, event)
         ev:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
         ev:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
         ev:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+        -- a picked macro's body is copied into its overlay: re-copy on edits
+        ev:RegisterEvent("UPDATE_MACROS")
         if NS.OnReady then NS.OnReady() end
     elseif event == "PLAYER_ENTERING_WORLD" then
         ApplyAll()
@@ -745,7 +785,7 @@ ev:SetScript("OnEvent", function(_, event)
         -- picking edits secure frames: never leave the picker open in combat
         if NS.SetSetup then NS.SetSetup(false) end
     elseif event == "ACTIONBAR_SLOT_CHANGED" or event == "ACTIONBAR_PAGE_CHANGED"
-        or event == "UPDATE_BONUS_ACTIONBAR" then
+        or event == "UPDATE_BONUS_ACTIONBAR" or event == "UPDATE_MACROS" then
         QueueApply()
         QueuePanelRefresh()
     end

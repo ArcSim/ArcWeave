@@ -1,5 +1,14 @@
 # Arc Weave changelog
 
+## 1.0.1
+
+### New Features
+- **Queued swing bar color** - A new option on the Swing Timer tab colors the main-hand swing bar while a next-melee ability like Raptor Strike is queued, so you can see at a glance that your next swing will use it. Give each tracked ability its own color on the Tracked tab, with a default color for the rest. The bar goes back to normal as soon as the attack lands or you cancel it. Off by default.
+- **Queued tick rides the swing** - The Swing Timer tab's "Ready or queued marker" choice has a new option, Queued rides the swing: once you queue an ability, its tick and icon ride the swing bar's moving fill to where the attack lands. The other two choices, stays where it came back and jumps to where the swing lands, work as before.
+
+### Bug Fixes
+- **Macros on picked buttons** - Picked action bar buttons that hold a macro now run the macro again. Before, pressing them only sent your pet.
+
 ## 1.0.0
 
 First public release, for WoW Forever.
